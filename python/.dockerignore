@@ -1,0 +1,13 @@
+# .dockerignore for Python
+__pycache__
+*.py[cod]
+*$py.class
+.env
+.env.local
+.git
+.gitignore
+README.md
+*.log
+.DS_Store
+venv/
+ENV/
