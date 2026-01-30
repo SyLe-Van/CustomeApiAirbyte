@@ -13,6 +13,11 @@ from app.config import settings
 from app.services.netsuite import NetSuiteClient
 from app.utils.cache import CacheManager
 from app.utils.security import verify_api_key
+from app.utils.formatter import (
+    flatten_netsuite_response,
+    transform_for_database,
+    format_response_for_airbyte
+)
 
 # Configure logging
 logging.basicConfig(
@@ -256,6 +261,196 @@ async def get_netsuite_records(
                 "details": str(e) if settings.ENVIRONMENT == "development" else None
             }
         )
+
+
+# FORMATTED ENDPOINTS FOR DATABASE-FRIENDLY RESPONSES
+@app.get("/api/netsuite/{entity}/formatted", tags=["NetSuite - Formatted"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_netsuite_records_formatted(
+    request: Request,
+    entity: str = Path(..., description="NetSuite entity type (customer, invoice, etc.)"),
+    limit: int = Query(1000, description="Number of records to fetch"),
+    offset: int = Query(0, description="Offset for pagination"),
+    q: str = Query(None, description="SUITEQL filter query"),
+    fields: str = Query(None, description="Comma-separated list of fields"),
+    expandSubresources: str = Query(None, description="Expand subresources"),
+    expand: bool = Query(True, description="Fetch full details for each record (default: true)"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    format_type: str = Query("database", description="Format type: 'database', 'flat', or 'airbyte'"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Fetch records from NetSuite with formatted response (database-friendly).
+    
+    This endpoint returns only the data you need without extra metadata.
+    
+    **Format Types:**
+    - `database`: Returns only the items array - perfect for direct database insertion
+    - `flat`: Returns items with minimal metadata (entity, count)
+    - `airbyte`: Returns records in Airbyte-compatible format
+    
+    **Other Parameters:**
+    - **entity**: NetSuite entity type (customer, invoice, salesorder, etc.)
+    - **limit**: Number of records to fetch (default: 1000)
+    - **offset**: Offset for pagination (default: 0)
+    - **q**: SUITEQL filter query
+    - **fields**: Comma-separated list of fields to return
+    - **expand**: Automatically fetch full details for each record (default: true)
+    """
+    try:
+        # Validate entity
+        if not entity or len(entity) < 2:
+            raise HTTPException(status_code=400, detail="Invalid entity name")
+
+        # Build cache key
+        cache_key = f"netsuite_formatted:{entity}:{limit}:{offset}:{q or ''}:{fields or ''}:{expand}:{format_type}"
+
+        # Check cache
+        if not no_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                logger.info(f"Returning cached formatted data for entity: {entity}")
+                return cached_data
+
+        # Initialize NetSuite client
+        netsuite_client = NetSuiteClient(
+            realm=settings.NETSUITE_REALM,
+            consumer_key=settings.NETSUITE_CONSUMER_KEY,
+            consumer_secret=settings.NETSUITE_CONSUMER_SECRET,
+            token_key=settings.NETSUITE_TOKEN_KEY,
+            token_secret=settings.NETSUITE_TOKEN_SECRET
+        )
+
+        # Build query params
+        query_params = {"limit": limit, "offset": offset}
+        if q:
+            query_params["q"] = q
+        if fields:
+            query_params["fields"] = fields
+        if expandSubresources:
+            query_params["expandSubresources"] = expandSubresources
+
+        # Fetch data from NetSuite
+        logger.info(f"Fetching formatted data from NetSuite - Entity: {entity}, Format: {format_type}")
+        data = await netsuite_client.get_records(entity, query_params, expand_details=expand)
+
+        # Apply formatting based on format_type
+        if format_type == "database":
+            # Return only the items array for direct database insertion
+            formatted_data = transform_for_database(data)
+        elif format_type == "flat":
+            # Return items with minimal metadata
+            formatted_data = flatten_netsuite_response(data, include_metadata=True)
+        elif format_type == "airbyte":
+            # Return Airbyte-compatible format
+            formatted_data = format_response_for_airbyte(data)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid format_type '{format_type}'. Use 'database', 'flat', or 'airbyte'"
+            )
+
+        # Cache the result (5 minutes TTL)
+        cache.set(cache_key, formatted_data, ttl=300)
+
+        return formatted_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching formatted NetSuite data: {str(e)}", exc_info=True)
+        
+        # Handle specific error types
+        error_msg = str(e).lower()
+        if "401" in error_msg or "authentication" in error_msg:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "Authentication Failed",
+                    "message": "NetSuite authentication failed. Check credentials.",
+                    "details": str(e) if settings.ENVIRONMENT == "development" else None
+                }
+            )
+        
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Internal Server Error",
+                "message": "Failed to fetch formatted data from NetSuite",
+                "details": str(e) if settings.ENVIRONMENT == "development" else None
+            }
+        )
+
+
+@app.get("/api/netsuite/{entity}/database", tags=["NetSuite - Formatted"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_netsuite_for_database(
+    request: Request,
+    entity: str = Path(..., description="NetSuite entity type"),
+    limit: int = Query(1000, description="Number of records to fetch"),
+    offset: int = Query(0, description="Offset for pagination"),
+    q: str = Query(None, description="SUITEQL filter query"),
+    fields: str = Query(None, description="Comma-separated list of fields"),
+    expand: bool = Query(True, description="Fetch full details for each record"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Get NetSuite records formatted for direct database insertion.
+    
+    Returns ONLY the items array without any wrapper metadata.
+    Perfect for importing directly into your database.
+    """
+    # Reuse the formatted endpoint with database format
+    return await get_netsuite_records_formatted(
+        request=request,
+        entity=entity,
+        limit=limit,
+        offset=offset,
+        q=q,
+        fields=fields,
+        expandSubresources=None,
+        expand=expand,
+        no_cache=no_cache,
+        format_type="database",
+        api_key=api_key
+    )
+
+
+@app.get("/api/netsuite/{entity}/airbyte", tags=["NetSuite - Formatted"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_netsuite_for_airbyte(
+    request: Request,
+    entity: str = Path(..., description="NetSuite entity type"),
+    limit: int = Query(1000, description="Number of records to fetch"),
+    offset: int = Query(0, description="Offset for pagination"),
+    q: str = Query(None, description="SUITEQL filter query"),
+    fields: str = Query(None, description="Comma-separated list of fields"),
+    expand: bool = Query(True, description="Fetch full details for each record"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Get NetSuite records formatted for Airbyte integration.
+    
+    Returns records in a structure that Airbyte can easily parse,
+    with pagination information included.
+    """
+    # Reuse the formatted endpoint with airbyte format
+    return await get_netsuite_records_formatted(
+        request=request,
+        entity=entity,
+        limit=limit,
+        offset=offset,
+        q=q,
+        fields=fields,
+        expandSubresources=None,
+        expand=expand,
+        no_cache=no_cache,
+        format_type="airbyte",
+        api_key=api_key
+    )
+
 
 
 @app.post("/api/netsuite/{entity}/query", tags=["NetSuite"])
