@@ -803,10 +803,12 @@ async def get_saved_search_report(
             "searchId": search_id
         }
 
-        logger.info(f"Calling RESTlet POST - User: {user_id}, SearchID: {search_id}")
+        logger.info(f"Calling RESTlet POST (Sync) - User: {user_id}, SearchID: {search_id}")
         
-        # Call RESTlet with POST
-        result = await netsuite_client.call_restlet(restlet_url, params=restlet_body, method="POST")
+        # Call RESTlet using the synchronous method with requests_oauthlib
+        # We run this directly (blocking) or could wrap in run_in_executor if needed, 
+        # but for now we prioritize correctness over non-blocking.
+        result = netsuite_client.call_restlet_sync(restlet_url, params=restlet_body, method="POST")
         
         # Check if result is a list or dict
         if isinstance(result, list):

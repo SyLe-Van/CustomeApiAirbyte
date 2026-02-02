@@ -257,6 +257,38 @@ class NetSuiteClient:
         
         return result
 
+    def call_restlet_sync(self, restlet_url: str, params: Dict[str, Any] = None, method: str = "POST") -> Dict[str, Any]:
+        """
+        Call NetSuite RESTlet using sync requests + OAuth1 library
+        
+        This method uses requests_oauthlib (same as working Python code)
+        to ensure correct OAuth signature for RESTlet calls.
+        """
+        import requests
+        from requests_oauthlib import OAuth1
+        
+        auth = OAuth1(
+            client_key=self.consumer_key,
+            client_secret=self.consumer_secret,
+            resource_owner_key=self.token_key,
+            resource_owner_secret=self.token_secret,
+            realm=self.realm,
+            signature_method="HMAC-SHA256",
+        )
+        
+        headers = {"Content-Type": "application/json"}
+        
+        if method.upper() == "POST":
+            response = requests.post(restlet_url, auth=auth, headers=headers, json=params, timeout=30)
+        else:
+            response = requests.get(restlet_url, auth=auth, headers=headers, params=params, timeout=30)
+        
+        if response.status_code >= 400:
+            error_text = response.text
+            logger.error(f"NetSuite RESTlet error ({response.status_code}): {error_text}")
+            raise Exception(f"NetSuite RESTlet error ({response.status_code}): {error_text}")
+        
+        return response.json()
 
 
 # Import asyncio for sleep
