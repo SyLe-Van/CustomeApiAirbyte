@@ -570,6 +570,204 @@ async def get_netsuite_custom_format(
         }
 
 
+@app.get("/api/reports/salesorder-detail", tags=["Reports - Custom"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_salesorder_detail_report(
+    request: Request,
+    user_id: int = Query(8, description="User ID"),
+    start_date: str = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(None, description="End date (YYYY-MM-DD)"),
+    location_id: str = Query(None, description="Location/Warehouse ID filter"),
+    limit: int = Query(10000, description="Number of records"),
+    offset: int = Query(0, description="Offset for pagination"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Báo cáo chi tiết đơn hàng (JOIN Sales Order + Item Fulfillment + Items).
+    
+    Trả về data đã JOIN từ nhiều bảng với các cột:
+    - Thông tin đơn hàng (SO)
+    - Thông tin khách hàng
+    - Thông tin sản phẩm
+    - Thông tin xuất kho (Item Fulfillment)
+    - Các custom fields
+    
+    **Response Format:**
+    ```json
+    {
+        "success": true,
+        "user": 8,
+        "count": 4760,
+        "data": [
+            {
+                "Kho hàng": "8 - Khác",
+                "Hình thức bán hàng": "8 - Khác",
+                "Ngày SO": "31/1/2026",
+                "Đơn hàng": "SO-2601-104",
+                "Mã DH (KD)": "001PMX36",
+                "Tên khách hàng": "CÔNG TY TNHH...",
+                "Mã hàng": "125",
+                "Loại Hàng": "Inventory Item",
+                "Số lượng": "100",
+                "Đơn giá": "261459.34",
+                "Thành tiền (SO)": "26145934.00",
+                ...
+            }
+        ]
+    }
+    ```
+    """
+    try:
+        # Build cache key
+        cache_key = f"report:so_detail:{user_id}:{start_date}:{end_date}:{location_id}:{limit}:{offset}"
+        
+        # Check cache
+        if not no_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                logger.info(f"Returning cached sales order report")
+                return cached_data
+
+        # Initialize NetSuite client
+        netsuite_client = NetSuiteClient(
+            realm=settings.NETSUITE_REALM,
+            consumer_key=settings.NETSUITE_CONSUMER_KEY,
+            consumer_secret=settings.NETSUITE_CONSUMER_SECRET,
+            token_key=settings.NETSUITE_TOKEN_KEY,
+            token_secret=settings.NETSUITE_TOKEN_SECRET
+        )
+
+        # Build SuiteQL query to JOIN multiple tables
+        query = """
+            SELECT
+                -- Sales Order Info
+                SO.id AS so_internal_id,
+                SO.tranid AS don_hang,
+                SO.trandate AS ngay_so,
+                SO.otherrefnum AS ma_dh_kd,
+                
+                -- Customer Info
+                C.entityid AS ma_khach_hang,
+                C.companyname AS ten_khach_hang,
+                
+                -- Location (Warehouse)
+                L.name AS kho_hang,
+                
+                -- Department/Class
+                CL.name AS class_name,
+                DEPT.name AS bo_phan,
+                
+                -- Sales Order Line Items
+                SOL.item AS item_id,
+                I.itemid AS ma_hang,
+                I.displayname AS mo_ta_day_du,
+                I.itemtype AS loai_hang,
+                
+                SOL.quantity AS so_luong,
+                SOL.rate AS don_gia,
+                SOL.amount AS thanh_tien_so,
+                
+                -- Item Fulfillment Info (if exists)
+                IF.tranid AS so_chung_tu_xuat,
+                IF.trandate AS ngay_xuat,
+                IFL.quantity AS so_luong_da_xuat,
+                
+                -- Financial
+                SO.subtotal AS sub_total,
+                SO.taxtotal AS tien_vat,
+                SO.discounttotal AS tien_chiet_khau,
+                SO.total AS tong_tien_gom_vat,
+                
+                -- Status
+                SO.status AS trang_thai,
+                SO.memo AS dien_giai
+                
+            FROM 
+                Transaction SO
+                LEFT JOIN TransactionLine SOL ON SO.id = SOL.transaction
+                LEFT JOIN Customer C ON SO.entity = C.id
+                LEFT JOIN Location L ON SO.location = L.id
+                LEFT JOIN Classification CL ON SO.class = CL.id
+                LEFT JOIN Department DEPT ON SO.department = DEPT.id
+                LEFT JOIN Item I ON SOL.item = I.id
+                LEFT JOIN Transaction IF ON IF.createdfrom = SO.id AND IF.type = 'ItemShip'
+                LEFT JOIN TransactionLine IFL ON IF.id = IFL.transaction AND IFL.item = SOL.item
+                
+            WHERE 
+                SO.type = 'SalesOrd'
+        """
+        
+        # Add date filter if provided
+        if start_date:
+            query += f" AND SO.trandate >= TO_DATE('{start_date}', 'YYYY-MM-DD')"
+        if end_date:
+            query += f" AND SO.trandate <= TO_DATE('{end_date}', 'YYYY-MM-DD')"
+        if location_id:
+            query += f" AND SO.location = {location_id}"
+            
+        query += f" ORDER BY SO.trandate DESC, SO.id DESC"
+
+        logger.info(f"Executing SalesOrder detail report - User: {user_id}, Date range: {start_date} to {end_date}")
+        
+        # Execute SuiteQL query
+        suiteql_result = await netsuite_client.execute_suiteql(query, limit=limit, offset=offset)
+        
+        # Transform to Vietnamese field names
+        items = suiteql_result.get("items", [])
+        transformed_items = []
+        
+        for item in items:
+            transformed_item = {
+                "Kho hàng": item.get("kho_hang", ""),
+                "Hình thức bán hàng": item.get("class_name", ""),
+                "Class": item.get("class_name", ""),
+                "Ngày SO": item.get("ngay_so", ""),
+                "Đơn hàng": item.get("don_hang", ""),
+                "Mã DH (KD)": item.get("ma_dh_kd", ""),
+                "Tên khách hàng": item.get("ten_khach_hang", ""),
+                "Mã hàng": item.get("ma_hang", ""),
+                "Mô tả đầy đủ": item.get("mo_ta_day_du", ""),
+                "Loại Hàng": item.get("loai_hang", ""),
+                "Số lượng": item.get("so_luong", ""),
+                "Đơn giá": item.get("don_gia", ""),
+                "Thành tiền (SO)": item.get("thanh_tien_so", ""),
+                "Số chứng từ xuất": item.get("so_chung_tu_xuat", ""),
+                "Ngày xuất": item.get("ngay_xuat", ""),
+                "Số lượng đã xuất": item.get("so_luong_da_xuat", ""),
+                "Tiền VAT": item.get("tien_vat", ""),
+                "Tiền chiết khấu": item.get("tien_chiet_khau", ""),
+                "Tổng tiền gồm VAT": item.get("tong_tien_gom_vat", ""),
+                "Diễn giải": item.get("dien_giai", ""),
+                "Trạng thái": item.get("trang_thai", ""),
+            }
+            transformed_items.append(transformed_item)
+        
+        result = {
+            "success": True,
+            "user": user_id,
+            "count": len(transformed_items),
+            "data": transformed_items
+        }
+        
+        # Cache for 5 minutes
+        cache.set(cache_key, result, ttl=300)
+        
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing sales order report: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "user": user_id,
+            "count": 0,
+            "data": [],
+            "error": str(e) if settings.ENVIRONMENT == "development" else "Failed to generate report"
+        }
+
+
 
 @app.post("/api/netsuite/{entity}/query", tags=["NetSuite"])
 @limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
