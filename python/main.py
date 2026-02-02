@@ -751,7 +751,7 @@ async def get_salesorder_lines_report(
 async def get_saved_search_report(
     request: Request,
     user_id: int = Query(8, description="User ID"),
-    search_id: str = Query("customsearch_btm_item_fulfillment_moni_5", description="Saved Search Internal ID"),
+    search_id: str = Query("customsearch_btm_item_fulfillment_moni_7", description="Saved Search Internal ID"),
     restlet_url: str = Query(
         "https://9692499.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script=997&deploy=1",
         description="RESTlet URL"
