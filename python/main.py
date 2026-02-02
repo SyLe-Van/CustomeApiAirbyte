@@ -745,6 +745,96 @@ async def get_salesorder_lines_report(
         }
 
 
+@app.get("/api/reports/saved-search", tags=["Reports - Custom"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_saved_search_report(
+    request: Request,
+    user_id: int = Query(8, description="User ID"),
+    restlet_url: str = Query(
+        "https://9692499.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script=997&deploy=1",
+        description="RESTlet URL"
+    ),
+    limit: int = Query(10000, description="Number of records to fetch"),
+    offset: int = Query(0, description="Offset for pagination"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Call NetSuite Saved Search via RESTlet.
+    
+    Endpoint này gọi RESTlet để lấy kết quả từ Saved Search đã tạo trong NetSuite.
+    Data sẽ có đầy đủ các fields và custom fields từ Saved Search.
+    
+    **Default RESTlet:** Sales Order Lines Saved Search
+    
+    **Response:** Trả về data từ Saved Search với Vietnamese field names (nếu có)
+    """
+    try:
+        # Build cache key
+        cache_key = f"report:saved_search:{user_id}:{hash(restlet_url)}:{limit}:{offset}"
+        
+        # Check cache
+        if not no_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                logger.info(f"Returning cached saved search report")
+                return cached_data
+
+        # Initialize NetSuite client
+        netsuite_client = NetSuiteClient(
+            realm=settings.NETSUITE_REALM,
+            consumer_key=settings.NETSUITE_CONSUMER_KEY,
+            consumer_secret=settings.NETSUITE_CONSUMER_SECRET,
+            token_key=settings.NETSUITE_TOKEN_KEY,
+            token_secret=settings.NETSUITE_TOKEN_SECRET
+        )
+
+        # Prepare RESTlet parameters
+        restlet_params = {
+            "limit": limit,
+            "offset": offset
+        }
+
+        logger.info(f"Calling RESTlet - User: {user_id}, URL: {restlet_url}")
+        
+        # Call RESTlet
+        result = await netsuite_client.call_restlet(restlet_url, params=restlet_params, method="GET")
+        
+        # Check if result is a list or dict
+        if isinstance(result, list):
+            data_items = result
+        elif isinstance(result, dict):
+            # Try common keys for data
+            data_items = result.get("data", result.get("items", result.get("results", [result])))
+        else:
+            data_items = [result]
+        
+        # Return in standard format
+        result_data = {
+            "success": True,
+            "user": user_id,
+            "count": len(data_items) if isinstance(data_items, list) else 1,
+            "data": data_items
+        }
+        
+        # Cache for 5 minutes
+        cache.set(cache_key, result_data, ttl=300)
+        
+        return result_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calling saved search RESTlet: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "user": user_id,
+            "count": 0,
+            "data": [],
+            "error": str(e) if settings.ENVIRONMENT == "development" else "Failed to fetch saved search data"
+        }
+
+
 
 @app.get("/api/reports/salesorder-detail", tags=["Reports - Custom"])
 @limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")

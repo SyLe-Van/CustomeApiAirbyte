@@ -231,7 +231,30 @@ class NetSuiteClient:
             logger.warning(f"Failed to fetch sublist {sublist_name} for {entity}/{record_id}: {str(e)}")
             return {"items": []}
 
+    async def call_restlet(self, restlet_url: str, params: Dict[str, Any] = None, method: str = "GET") -> Dict[str, Any]:
+        """
+        Call a NetSuite RESTlet endpoint
+        
+        Args:
+            restlet_url: Full RESTlet URL (e.g., https://xxx.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script=997&deploy=1)
+            params: Query parameters or POST body
+            method: HTTP method (GET or POST)
+            
+        Returns:
+            RESTlet response data
+        """
+        headers = self._get_oauth_headers(method, restlet_url, params or {})
+        
+        if method.upper() == "GET":
+            # For GET, add params to URL
+            result = await self._make_request(restlet_url, method="GET", headers=headers, params=params)
+        else:
+            # For POST, send as JSON body
+            result = await self._make_request(restlet_url, method="POST", headers=headers, json_data=params)
+        
+        return result
 
 
 # Import asyncio for sleep
 import asyncio
+
