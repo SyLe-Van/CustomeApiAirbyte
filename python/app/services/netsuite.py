@@ -243,16 +243,20 @@ class NetSuiteClient:
         Returns:
             RESTlet response data
         """
-        headers = self._get_oauth_headers(method, restlet_url, params or {})
-        
+        # For OAuth signature: only include query params from URL, not POST body
+        # RESTlet URL already has script and deploy params
         if method.upper() == "GET":
-            # For GET, add params to URL
+            # For GET, params go in query string and should be in signature
+            headers = self._get_oauth_headers(method, restlet_url, params or {})
             result = await self._make_request(restlet_url, method="GET", headers=headers, params=params)
         else:
-            # For POST, send as JSON body
+            # For POST, body is NOT included in OAuth signature
+            # Only URL query params (script, deploy) are in signature
+            headers = self._get_oauth_headers(method, restlet_url, {})
             result = await self._make_request(restlet_url, method="POST", headers=headers, json_data=params)
         
         return result
+
 
 
 # Import asyncio for sleep
