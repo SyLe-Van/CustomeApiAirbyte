@@ -16,7 +16,8 @@ from app.utils.security import verify_api_key
 from app.utils.formatter import (
     flatten_netsuite_response,
     transform_for_database,
-    format_response_for_airbyte
+    format_response_for_airbyte,
+    custom_format_response
 )
 
 # Configure logging
@@ -450,6 +451,123 @@ async def get_netsuite_for_airbyte(
         format_type="airbyte",
         api_key=api_key
     )
+
+
+@app.get("/api/netsuite/{entity}/custom", tags=["NetSuite - Custom"])
+@limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
+async def get_netsuite_custom_format(
+    request: Request,
+    entity: str = Path(..., description="NetSuite entity type"),
+    limit: int = Query(10000, description="Number of records to fetch (default: 10000 for all)"),
+    offset: int = Query(0, description="Offset for pagination"),
+    user_id: int = Query(0, description="User ID for tracking"),
+    fields: str = Query(None, description="Comma-separated list of fields to include"),
+    q: str = Query(None, description="SUITEQL filter query"),
+    expand: bool = Query(True, description="Fetch full details for each record"),
+    no_cache: bool = Query(False, description="Skip cache"),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Get NetSuite records with custom Vietnamese format.
+    
+    Returns structure: {success: true, user: X, count: Y, data: [...]}
+    
+    **Response Format:**
+    ```json
+    {
+        "success": true,
+        "user": 8,
+        "count": 4760,
+        "data": [
+            {
+                "Mã Đơn hàng": "001PMX36",
+                "Đơn hàng": "SO-2601-104",
+                "Ngày SO": "31/1/2026",
+                "Kho hàng": "8 - Khác",
+                "Hình thức bán hàng": "8 - Khác",
+                "Mã khách hàng": "1718 - CUS2HCM8MY...",
+                "Tên khách hàng": "CÔNG TY TNHH...",
+                "Thành tiền (SO)": "26145934.00",
+                ...
+            }
+        ]
+    }
+    ```
+    
+    **Parameters:**
+    - **entity**: NetSuite entity type (customer, salesorder, invoice, etc.)
+    - **limit**: Number of records (default: 10000 to get all data)
+    - **offset**: Pagination offset
+    - **user_id**: Your user ID for tracking
+    - **fields**: Comma-separated fields to include (optional, default: all)
+    - **expand**: Fetch full details (default: true)
+    - **no_cache**: Skip cache
+    """
+    try:
+        # Validate entity
+        if not entity or len(entity) < 2:
+            raise HTTPException(status_code=400, detail="Invalid entity name")
+
+        # Build cache key
+        cache_key = f"netsuite_custom:{entity}:{limit}:{offset}:{user_id}:{fields or ''}:{expand}"
+
+        # Check cache
+        if not no_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                logger.info(f"Returning cached custom format data for entity: {entity}")
+                return cached_data
+
+        # Initialize NetSuite client
+        netsuite_client = NetSuiteClient(
+            realm=settings.NETSUITE_REALM,
+            consumer_key=settings.NETSUITE_CONSUMER_KEY,
+            consumer_secret=settings.NETSUITE_CONSUMER_SECRET,
+            token_key=settings.NETSUITE_TOKEN_KEY,
+            token_secret=settings.NETSUITE_TOKEN_SECRET
+        )
+
+        # Build query params
+        query_params = {"limit": limit, "offset": offset}
+        if q:
+            query_params["q"] = q
+        if fields:
+            query_params["fields"] = fields
+
+        # Fetch data from NetSuite
+        logger.info(f"Fetching custom format data from NetSuite - Entity: {entity}, User: {user_id}")
+        data = await netsuite_client.get_records(entity, query_params, expand_details=expand)
+
+        # Parse include_fields if provided
+        include_fields_list = None
+        if fields:
+            include_fields_list = [f.strip() for f in fields.split(",")]
+
+        # Apply custom formatting
+        formatted_data = custom_format_response(
+            data=data,
+            user_id=user_id,
+            include_fields=include_fields_list
+        )
+
+        # Cache the result (5 minutes TTL)
+        cache.set(cache_key, formatted_data, ttl=300)
+
+        return formatted_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching custom format NetSuite data: {str(e)}", exc_info=True)
+        
+        # Return error in same format
+        return {
+            "success": False,
+            "user": user_id,
+            "count": 0,
+            "data": [],
+            "error": str(e) if settings.ENVIRONMENT == "development" else "Failed to fetch data"
+        }
 
 
 
