@@ -746,10 +746,12 @@ async def get_salesorder_lines_report(
 
 
 @app.get("/api/reports/saved-search", tags=["Reports - Custom"])
+@app.post("/api/reports/saved-search", tags=["Reports - Custom"])
 @limiter.limit(f"{settings.RATE_LIMIT_MAX}/15minutes")
 async def get_saved_search_report(
     request: Request,
     user_id: int = Query(8, description="User ID"),
+    search_id: str = Query("customsearch_btm_item_fulfillment_moni_5", description="Saved Search Internal ID"),
     restlet_url: str = Query(
         "https://9692499.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script=997&deploy=1",
         description="RESTlet URL"
@@ -765,13 +767,20 @@ async def get_saved_search_report(
     Endpoint này gọi RESTlet để lấy kết quả từ Saved Search đã tạo trong NetSuite.
     Data sẽ có đầy đủ các fields và custom fields từ Saved Search.
     
-    **Default RESTlet:** Sales Order Lines Saved Search
+    **RESTlet expects POST with JSON body:**
+    ```json
+    {
+        "searchId": "customsearch_btm_item_fulfillment_moni_5"
+    }
+    ```
     
-    **Response:** Trả về data từ Saved Search với Vietnamese field names (nếu có)
+    **Default:** customsearch_btm_item_fulfillment_moni_5
+    
+    **Response:** Trả về data từ Saved Search với all custom fields
     """
     try:
         # Build cache key
-        cache_key = f"report:saved_search:{user_id}:{hash(restlet_url)}:{limit}:{offset}"
+        cache_key = f"report:saved_search:{user_id}:{search_id}:{limit}:{offset}"
         
         # Check cache
         if not no_cache:
@@ -789,16 +798,15 @@ async def get_saved_search_report(
             token_secret=settings.NETSUITE_TOKEN_SECRET
         )
 
-        # Prepare RESTlet parameters
-        restlet_params = {
-            "limit": limit,
-            "offset": offset
+        # Prepare RESTlet POST body
+        restlet_body = {
+            "searchId": search_id
         }
 
-        logger.info(f"Calling RESTlet - User: {user_id}, URL: {restlet_url}")
+        logger.info(f"Calling RESTlet POST - User: {user_id}, SearchID: {search_id}")
         
-        # Call RESTlet
-        result = await netsuite_client.call_restlet(restlet_url, params=restlet_params, method="GET")
+        # Call RESTlet with POST
+        result = await netsuite_client.call_restlet(restlet_url, params=restlet_body, method="POST")
         
         # Check if result is a list or dict
         if isinstance(result, list):
@@ -808,6 +816,10 @@ async def get_saved_search_report(
             data_items = result.get("data", result.get("items", result.get("results", [result])))
         else:
             data_items = [result]
+        
+        # Apply limit and offset on results
+        if isinstance(data_items, list):
+            data_items = data_items[offset:offset+limit]
         
         # Return in standard format
         result_data = {
