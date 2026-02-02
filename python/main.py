@@ -660,12 +660,18 @@ async def get_salesorder_lines_report(
                 "memo": so.get("memo", ""),
             }
             
-            # Get line items (item sublist)
-            line_items = so.get("item", {})
-            if isinstance(line_items, dict):
-                line_items_list = line_items.get("items", [])
-            else:
-                line_items_list = []
+            # Fetch line items sublist
+            so_id = so.get("id")
+            line_items_list = []
+            
+            if so_id:
+                try:
+                    # Fetch the 'item' sublist for this sales order
+                    sublist_data = await netsuite_client.get_sublist("salesorder", so_id, "item")
+                    line_items_list = sublist_data.get("items", [])
+                except Exception as e:
+                    logger.warning(f"Failed to fetch line items for SO {so_id}: {str(e)}")
+                    line_items_list = []
             
             # If no line items found, create one record with header data only
             if not line_items_list:

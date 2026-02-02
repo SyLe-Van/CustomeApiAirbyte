@@ -209,6 +209,29 @@ class NetSuiteClient:
         
         return await self._make_request(url, method="GET", headers=headers)
 
+    async def get_sublist(self, entity: str, record_id: str, sublist_name: str) -> Dict[str, Any]:
+        """
+        Get a sublist from a record (e.g., line items from a sales order)
+        
+        Args:
+            entity: Entity type (e.g., 'salesorder')
+            record_id: Record ID
+            sublist_name: Sublist name (e.g., 'item')
+            
+        Returns:
+            Sublist data
+        """
+        url = f"{self.base_url}/{entity}/{record_id}/{sublist_name}"
+        headers = self._get_oauth_headers("GET", url)
+        
+        try:
+            result = await self._make_request(url, method="GET", headers=headers)
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to fetch sublist {sublist_name} for {entity}/{record_id}: {str(e)}")
+            return {"items": []}
+
+
 
 # Import asyncio for sleep
 import asyncio
