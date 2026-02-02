@@ -639,63 +639,27 @@ async def get_salesorder_detail_report(
         )
 
         # Build SuiteQL query to JOIN multiple tables
+        # Note: NetSuite SuiteQL uses specific table names
         query = """
             SELECT
-                -- Sales Order Info
-                SO.id AS so_internal_id,
-                SO.tranid AS don_hang,
-                SO.trandate AS ngay_so,
-                SO.otherrefnum AS ma_dh_kd,
-                
-                -- Customer Info
-                C.entityid AS ma_khach_hang,
-                C.companyname AS ten_khach_hang,
-                
-                -- Location (Warehouse)
-                L.name AS kho_hang,
-                
-                -- Department/Class
-                CL.name AS class_name,
-                DEPT.name AS bo_phan,
-                
-                -- Sales Order Line Items
-                SOL.item AS item_id,
-                I.itemid AS ma_hang,
-                I.displayname AS mo_ta_day_du,
-                I.itemtype AS loai_hang,
-                
-                SOL.quantity AS so_luong,
-                SOL.rate AS don_gia,
-                SOL.amount AS thanh_tien_so,
-                
-                -- Item Fulfillment Info (if exists)
-                IF.tranid AS so_chung_tu_xuat,
-                IF.trandate AS ngay_xuat,
-                IFL.quantity AS so_luong_da_xuat,
-                
-                -- Financial
-                SO.subtotal AS sub_total,
-                SO.taxtotal AS tien_vat,
-                SO.discounttotal AS tien_chiet_khau,
-                SO.total AS tong_tien_gom_vat,
-                
-                -- Status
-                SO.status AS trang_thai,
-                SO.memo AS dien_giai
-                
+                t.id,
+                t.tranid,
+                t.trandate,
+                t.otherrefnum,
+                c.entityid,
+                c.companyname,
+                l.name as location_name,
+                tl.item,
+                tl.quantity,
+                tl.rate,
+                tl.amount
             FROM 
-                Transaction SO
-                LEFT JOIN TransactionLine SOL ON SO.id = SOL.transaction
-                LEFT JOIN Customer C ON SO.entity = C.id
-                LEFT JOIN Location L ON SO.location = L.id
-                LEFT JOIN Classification CL ON SO.class = CL.id
-                LEFT JOIN Department DEPT ON SO.department = DEPT.id
-                LEFT JOIN Item I ON SOL.item = I.id
-                LEFT JOIN Transaction IF ON IF.createdfrom = SO.id AND IF.type = 'ItemShip'
-                LEFT JOIN TransactionLine IFL ON IF.id = IFL.transaction AND IFL.item = SOL.item
-                
+                Transaction t
+                INNER JOIN TransactionLine tl ON t.id = tl.transaction
+                LEFT JOIN Customer c ON t.entity = c.id
+                LEFT JOIN Location l ON t.location = l.id
             WHERE 
-                SO.type = 'SalesOrd'
+                t.type = 'SalesOrd'
         """
         
         # Add date filter if provided
@@ -719,27 +683,17 @@ async def get_salesorder_detail_report(
         
         for item in items:
             transformed_item = {
-                "Kho hàng": item.get("kho_hang", ""),
-                "Hình thức bán hàng": item.get("class_name", ""),
-                "Class": item.get("class_name", ""),
-                "Ngày SO": item.get("ngay_so", ""),
-                "Đơn hàng": item.get("don_hang", ""),
-                "Mã DH (KD)": item.get("ma_dh_kd", ""),
-                "Tên khách hàng": item.get("ten_khach_hang", ""),
-                "Mã hàng": item.get("ma_hang", ""),
-                "Mô tả đầy đủ": item.get("mo_ta_day_du", ""),
-                "Loại Hàng": item.get("loai_hang", ""),
-                "Số lượng": item.get("so_luong", ""),
-                "Đơn giá": item.get("don_gia", ""),
-                "Thành tiền (SO)": item.get("thanh_tien_so", ""),
-                "Số chứng từ xuất": item.get("so_chung_tu_xuat", ""),
-                "Ngày xuất": item.get("ngay_xuat", ""),
-                "Số lượng đã xuất": item.get("so_luong_da_xuat", ""),
-                "Tiền VAT": item.get("tien_vat", ""),
-                "Tiền chiết khấu": item.get("tien_chiet_khau", ""),
-                "Tổng tiền gồm VAT": item.get("tong_tien_gom_vat", ""),
-                "Diễn giải": item.get("dien_giai", ""),
-                "Trạng thái": item.get("trang_thai", ""),
+                "ID": item.get("id", ""),
+                "Đơn hàng": item.get("tranid", ""),
+                "Ngày SO": item.get("trandate", ""),
+                "Mã DH (KD)": item.get("otherrefnum", ""),
+                "Mã khách hàng": item.get("entityid", ""),
+                "Tên khách hàng": item.get("companyname", ""),
+                "Kho hàng": item.get("location_name", ""),
+                "Mã Item": item.get("item", ""),
+                "Số lượng": item.get("quantity", ""),
+                "Đơn giá": item.get("rate", ""),
+                "Thành tiền (SO)": item.get("amount", ""),
             }
             transformed_items.append(transformed_item)
         
