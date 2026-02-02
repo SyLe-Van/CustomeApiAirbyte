@@ -577,17 +577,16 @@ async def get_salesorder_lines_report(
     user_id: int = Query(8, description="User ID"),
     start_date: str = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: str = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(1000, description="Number of sales orders to fetch"),
+    limit: int = Query(5000, description="Number of line items to fetch"),
     offset: int = Query(0, description="Offset for pagination"),
     no_cache: bool = Query(False, description="Skip cache"),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    Lấy chi tiết dòng (line items) của Sales Orders với các fields chuẩn.
+    Lấy chi tiết dòng (line items) của Sales Orders với SuiteQL.
     
-    Mỗi line item sẽ là một record riêng biệt với đầy đủ thông tin từ:
-    - Sales Order header (Đơn hàng, Ngày, Khách hàng, Kho...)
-    - Line item details (Mã hàng, Số lượng, Đơn giá...)
+    Dùng SuiteQL để JOIN Transaction + TransactionLine + Customer + Item.
+    Mỗi line item là một record với đầy đủ thông tin.
     
     **Standard Fields (có sẵn):**
     - Kho hàng, Hình thức bán hàng, Class
@@ -596,21 +595,16 @@ async def get_salesorder_lines_report(
     - Mã hàng, Số lượng, Đơn giá, Thành tiền (SO)
     - Tiền VAT, Tổng tiền gồm VAT
     - Diễn giải
-    
-    **Sẽ thêm sau (custom fields):**
-    - Mô tả đầy đủ, Loại hàng, Mã thương mại, Tone màu
-    - ĐVT, Quy cách, Chất lượng, Hệ số
-    - Số chứng từ xuất, Ngày xuất, Biển số xe, Số lượng đã xuất
     """
     try:
         # Build cache key
-        cache_key = f"report:so_lines:{user_id}:{start_date}:{end_date}:{limit}:{offset}"
+        cache_key = f"report:so_lines_sql:{user_id}:{start_date}:{end_date}:{limit}:{offset}"
         
         # Check cache
         if not no_cache:
             cached_data = cache.get(cache_key)
             if cached_data:
-                logger.info(f"Returning cached sales order lines report")
+                logger.info(f"Returning cached sales order lines report (SuiteQL)")
                 return cached_data
 
         # Initialize NetSuite client
@@ -622,152 +616,126 @@ async def get_salesorder_lines_report(
             token_secret=settings.NETSUITE_TOKEN_SECRET
         )
 
-        # Build query params for sales orders
-        query_params = {"limit": limit, "offset": offset}
+        # Build SuiteQL query
+        query = """
+            SELECT
+                t.id AS so_id,
+                t.tranid AS so_number,
+                t.trandate AS so_date,
+                t.otherrefnum AS customer_ref,
+                c.entityid AS customer_id,
+                c.companyname AS customer_name,
+                l.name AS location_name,
+                cl.name AS class_name,
+                d.name AS department_name,
+                t.status AS status,
+                t.total AS total,
+                t.subtotal AS subtotal,
+                t.taxtotal AS tax_total,
+                t.memo AS memo,
+                
+                tl.item AS item_id,
+                tl.quantity AS quantity,
+                tl.rate AS rate,
+                tl.amount AS amount,
+                tl.units AS units,
+                tl.description AS line_description
+                
+            FROM 
+                Transaction t
+                INNER JOIN TransactionLine tl ON t.id = tl.transaction
+                LEFT JOIN Customer c ON t.entity = c.id
+                LEFT JOIN Location l ON t.location = l.id
+                LEFT JOIN Classification cl ON t.class = cl.id
+                LEFT JOIN Department d ON t.department = d.id
+            WHERE 
+                t.type = 'SalesOrd'
+        """
         
-        # Add date filters to query
+        # Add date filters
         if start_date and end_date:
-            query_params["q"] = f"tranDate BETWEEN '{start_date}' AND '{end_date}'"
+            query += f" AND t.trandate BETWEEN TO_DATE('{start_date}', 'YYYY-MM-DD') AND TO_DATE('{end_date}', 'YYYY-MM-DD')"
         elif start_date:
-            query_params["q"] = f"tranDate >= '{start_date}'"
+            query += f" AND t.trandate >= TO_DATE('{start_date}', 'YYYY-MM-DD')"
         elif end_date:
-            query_params["q"] = f"tranDate <= '{end_date}'"
+            query += f" AND t.trandate <= TO_DATE('{end_date}', 'YYYY-MM-DD')"
+            
+        query += " ORDER BY t.trandate DESC, t.id, tl.lineid"
 
-        logger.info(f"Fetching sales orders - User: {user_id}, Limit: {limit}")
+        logger.info(f"Executing SuiteQL for sales order lines - User: {user_id}, Limit: {limit}")
         
-        # Fetch sales orders with full details
-        data = await netsuite_client.get_records("salesorder", query_params, expand_details=True)
+        # Execute SuiteQL
+        result = await netsuite_client.execute_suiteql(query, limit=limit, offset=offset)
         
-        items = data.get("items", [])
-        flattened_lines = []
+        items = result.get("items", [])
+        transformed_lines = []
         
-        # Flatten each sales order's line items
-        for so in items:
-            # Extract header info
-            so_header = {
-                "so_id": so.get("id", ""),
-                "tranid": so.get("tranId", ""),
-                "trandate": so.get("tranDate", ""),
-                "otherrefnum": so.get("otherRefNum", ""),
-                "entity_name": so.get("entity", {}).get("refName", ""),
-                "location_name": so.get("location", {}).get("refName", ""),
-                "class_name": so.get("class", {}).get("refName", ""),
-                "department": so.get("department", {}).get("refName", ""),
-                "status": so.get("status", {}).get("refName", "") if isinstance(so.get("status"), dict) else so.get("status", ""),
-                "total": so.get("total", ""),
-                "subtotal": so.get("subtotal", ""),
-                "taxtotal": so.get("taxTotal", ""),
-                "memo": so.get("memo", ""),
+        # Transform each line
+        for item in items:
+            record = {
+                "Đơn hàng": item.get("so_number", ""),
+                "Ngày SO": item.get("so_date", ""),
+                "Mã DH (KD)": item.get("customer_ref", ""),
+                "Tên khách hàng": item.get("customer_name", ""),
+                "Kho hàng": item.get("location_name", ""),
+                "Hình thức bán hàng": item.get("class_name", ""),
+                "Class": item.get("class_name", ""),
+                "Bộ phận": item.get("department_name", ""),
+                "Trạng thái": item.get("status", ""),
+                
+                # Line item details
+                "Mã hàng": str(item.get("item_id", "")),
+                "Mô tả đầy đủ": item.get("line_description", ""),
+                "Số lượng": item.get("quantity", ""),
+                "Đơn giá": item.get("rate", ""),
+                "Thành tiền (SO)": item.get("amount", ""),
+                "ĐVT": item.get("units", ""),
+                
+                # Financial (from header)
+                "Tiền VAT": item.get("tax_total", ""),
+                "Tổng tiền gồm VAT": item.get("total", ""),
+                "Diễn giải": item.get("memo", ""),
+                
+                # Placeholder for custom fields (to be added later)
+                "Loại hàng": "",
+                "Mã thương mại": "",
+                "Tone màu": "",
+                "Tone màu (ITF)": "",
+                "Chất lượng": "",
+                "Quy cách": "",
+                "Hệ số": "",
+                "Hệ số CT": "",
+                
+                # Placeholder for fulfillment fields (to be added later)
+                "Số chứng từ xuất": "",
+                "Ngày xuất": "",
+                "Biển số xe": "",
+                "Số lượng đã xuất (TẤM)": "",
+                "Số lượng đã xuất (m2)": "",
+                "SL xuất CT m2": "",
+                "Số Lot": "",
+                "Nghiệp vụ xuất": "",
+                "Thành tiền (lxuất)": "",
             }
             
-            # Fetch line items sublist
-            so_id = so.get("id")
-            line_items_list = []
-            
-            if so_id:
-                try:
-                    # Fetch the 'item' sublist for this sales order
-                    sublist_data = await netsuite_client.get_sublist("salesorder", so_id, "item")
-                    line_items_list = sublist_data.get("items", [])
-                except Exception as e:
-                    logger.warning(f"Failed to fetch line items for SO {so_id}: {str(e)}")
-                    line_items_list = []
-            
-            # If no line items found, create one record with header data only
-            if not line_items_list:
-                record = {
-                    "Đơn hàng": so_header["tranid"],
-                    "Ngày SO": so_header["trandate"],
-                    "Mã DH (KD)": so_header["otherrefnum"],
-                    "Tên khách hàng": so_header["entity_name"],
-                    "Kho hàng": so_header["location_name"],
-                    "Hình thức bán hàng": so_header["class_name"],
-                    "Class": so_header["class_name"],
-                    "Bộ phận": so_header["department"],
-                    "Trạng thái": so_header["status"],
-                    "Mã hàng": "",
-                    "Mô tả đầy đủ": "",
-                    "Loại hàng": "",
-                    "Số lượng": "",
-                    "Đơn giá": "",
-                    "Thành tiền (SO)": "",
-                    "ĐVT": "",
-                    "Tiền VAT": so_header["taxtotal"],
-                    "Tổng tiền gồm VAT": so_header["total"],
-                    "Diễn giải": so_header["memo"],
-                }
-                flattened_lines.append(record)
-            else:
-                # Create one record per line item
-                for line in line_items_list:
-                    # Extract item info
-                    item_ref = line.get("item", {})
-                    item_name = item_ref.get("refName", "") if isinstance(item_ref, dict) else ""
-                    
-                    record = {
-                        "Đơn hàng": so_header["tranid"],
-                        "Ngày SO": so_header["trandate"],
-                        "Mã DH (KD)": so_header["otherrefnum"],
-                        "Tên khách hàng": so_header["entity_name"],
-                        "Kho hàng": so_header["location_name"],
-                        "Hình thức bán hàng": so_header["class_name"],
-                        "Class": so_header["class_name"],
-                        "Bộ phận": so_header["department"],
-                        "Trạng thái": so_header["status"],
-                        
-                        # Line item details
-                        "Mã hàng": item_name,  # This is item refName (ID-Name format)
-                        "Mô tả đầy đủ": line.get("description", ""),
-                        "Loại hàng": "",  # Will add later with item master lookup
-                        "Số lượng": line.get("quantity", ""),
-                        "Đơn giá": line.get("rate", ""),
-                        "Thành tiền (SO)": line.get("amount", ""),
-                        "ĐVT": line.get("units", {}).get("refName", "") if isinstance(line.get("units"), dict) else "",
-                        
-                        # Financial (from header, repeated for each line)
-                        "Tiền VAT": so_header["taxtotal"],
-                        "Tổng tiền gồm VAT": so_header["total"],
-                        "Diễn giải": so_header["memo"],
-                        
-                        # Placeholder for custom fields (to be added later)
-                        "Mã thương mại": "",
-                        "Tone màu": "",
-                        "Tone màu (ITF)": "",
-                        "Chất lượng": "",
-                        "Quy cách": "",
-                        "Hệ số": "",
-                        "Hệ số CT": "",
-                        
-                        # Placeholder for fulfillment fields (to be added later)
-                        "Số chứng từ xuất": "",
-                        "Ngày xuất": "",
-                        "Biển số xe": "",
-                        "Số lượng đã xuất (TẤM)": "",
-                        "Số lượng đã xuất (m2)": "",
-                        "SL xuất CT m2": "",
-                        "Số Lot": "",
-                        "Nghiệp vụ xuất": "",
-                        "Thành tiền (lxuất)": "",
-                    }
-                    
-                    flattened_lines.append(record)
+            transformed_lines.append(record)
         
-        result = {
+        result_data = {
             "success": True,
             "user": user_id,
-            "count": len(flattened_lines),
-            "data": flattened_lines
+            "count": len(transformed_lines),
+            "data": transformed_lines
         }
         
         # Cache for 5 minutes
-        cache.set(cache_key, result, ttl=300)
+        cache.set(cache_key, result_data, ttl=300)
         
-        return result
+        return result_data
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error executing sales order lines report: {str(e)}", exc_info=True)
+        logger.error(f"Error executing sales order lines report (SuiteQL): {str(e)}", exc_info=True)
         return {
             "success": False,
             "user": user_id,
@@ -775,6 +743,7 @@ async def get_salesorder_lines_report(
             "data": [],
             "error": str(e) if settings.ENVIRONMENT == "development" else "Failed to generate report"
         }
+
 
 
 @app.get("/api/reports/salesorder-detail", tags=["Reports - Custom"])
